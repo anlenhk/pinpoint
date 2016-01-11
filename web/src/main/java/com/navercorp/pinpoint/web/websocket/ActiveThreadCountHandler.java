@@ -46,6 +46,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -62,19 +65,20 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
 
     private final Object lock = new Object();
-    private final AgentService agentSerivce;
+    private final AgentService agentService;
     private final List<WebSocketSession> sessionRepository = new CopyOnWriteArrayList<>();
     private final Map<String, PinpointWebSocketResponseAggregator> aggregatorRepository = new ConcurrentHashMap<>();
-    private PinpointWebSocketMessageConverter messageConverter = new PinpointWebSocketMessageConverter();
+    private final PinpointWebSocketMessageConverter messageConverter = new PinpointWebSocketMessageConverter();
 
     private static final String DEFAULT_REQUEST_MAPPING = "/agent/activeThread";
     private final String requestMapping;
 
     private final AtomicBoolean onTimerTask = new AtomicBoolean(false);
 
+    private ExecutorService webSocketFlushThreadPool;
+
     private Timer flushTimer;
     private static final long DEFAULT_FLUSH_DELAY = 1000;
-    private static final long DEFAULT_MIN_FLUSH_DELAY = 500;
     private final long flushDelay;
 
     private Timer  healthCheckTimer;
@@ -83,32 +87,35 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
 
     private Timer reactiveTimer;
 
-    public ActiveThreadCountHandler(AgentService agentSerivce) {
-        this(DEFAULT_REQUEST_MAPPING, agentSerivce);
+    public ActiveThreadCountHandler(AgentService agentService) {
+        this(DEFAULT_REQUEST_MAPPING, agentService);
     }
 
-    public ActiveThreadCountHandler(String requestMapping, AgentService agentSerivce) {
-        this(requestMapping, agentSerivce, DEFAULT_FLUSH_DELAY);
+    public ActiveThreadCountHandler(String requestMapping, AgentService agentService) {
+        this(requestMapping, agentService, DEFAULT_FLUSH_DELAY);
     }
 
-    public ActiveThreadCountHandler(String requestMapping, AgentService agentSerivce, long flushDelay) {
-        this(requestMapping, agentSerivce, flushDelay, DEFAULT_HEALTH_CHECk_DELAY);
+    public ActiveThreadCountHandler(String requestMapping, AgentService agentService, long flushDelay) {
+        this(requestMapping, agentService, flushDelay, DEFAULT_HEALTH_CHECk_DELAY);
     }
 
-    public ActiveThreadCountHandler(String requestMapping, AgentService agentSerivce, long flushDelay, long healthCheckDelay) {
+    public ActiveThreadCountHandler(String requestMapping, AgentService agentService, long flushDelay, long healthCheckDelay) {
         this.requestMapping = requestMapping;
-        this.agentSerivce = agentSerivce;
+        this.agentService = agentService;
         this.flushDelay = flushDelay;
         this.healthCheckDelay = healthCheckDelay;
     }
 
     @Override
     public void start() {
+        PinpointThreadFactory flushFactory = new PinpointThreadFactory(ClassUtils.simpleClassName(this) + "-Flush-Thread", true);
+        webSocketFlushThreadPool = new ThreadPoolExecutor(Runtime.getRuntime().availableProcessors(), Integer.MAX_VALUE, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(), flushFactory);
+
         PinpointThreadFactory threadFactory = new PinpointThreadFactory(ClassUtils.simpleClassName(this) + "-Timer", true);
-        this.flushTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
-        this.healthCheckTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
-        this.reactiveTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
-    }
+        flushTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
+        healthCheckTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
+        reactiveTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
+   }
 
     @Override
     public void stop() {
@@ -129,6 +136,10 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
 
         if (reactiveTimer != null) {
             reactiveTimer.stop();
+        }
+
+        if (webSocketFlushThreadPool != null) {
+            webSocketFlushThreadPool.shutdown();
         }
     }
 
@@ -233,7 +244,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
 
         PinpointWebSocketResponseAggregator responseAggregator = aggregatorRepository.get(applicationName);
         if (responseAggregator == null) {
-            responseAggregator = new ActiveThreadCountResponseAggregator(applicationName, agentSerivce, reactiveTimer);
+            responseAggregator = new ActiveThreadCountResponseAggregator(applicationName, agentService, reactiveTimer);
             responseAggregator.start();
             aggregatorRepository.put(applicationName, responseAggregator);
         }
@@ -266,26 +277,24 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         public void run(Timeout timeout) throws Exception {
             long startTime = System.currentTimeMillis();
             try {
-                logger.info("ActiveThreadTimerTask started.");
+                logger.info("ActiveThreadTimerTask started. {}", startTime);
 
                 Collection<PinpointWebSocketResponseAggregator> values = aggregatorRepository.values();
-                for (PinpointWebSocketResponseAggregator aggregator : values) {
-                    try {
-                        aggregator.flush();
-                    } catch (Exception e) {
-                        logger.warn(e.getMessage(), e);
-                    }
+                for (final PinpointWebSocketResponseAggregator aggregator : values) {
+                    webSocketFlushThreadPool.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                aggregator.flush();
+                            } catch (Exception e) {
+                                logger.warn(e.getMessage(), e);
+                            }
+                        }
+                    });
                 }
             } finally {
                 if (flushTimer != null && onTimerTask.get()) {
-                    long execTime = System.currentTimeMillis() - startTime;
-
-                    long nextFlushDelay = flushDelay - execTime;
-                    if (nextFlushDelay < DEFAULT_MIN_FLUSH_DELAY) {
-                        flushTimer.newTimeout(this, DEFAULT_MIN_FLUSH_DELAY, TimeUnit.MILLISECONDS);
-                    } else {
-                        flushTimer.newTimeout(this, nextFlushDelay, TimeUnit.MILLISECONDS);
-                    }
+                    flushTimer.newTimeout(this, flushDelay, TimeUnit.MILLISECONDS);
                 }
             }
         }

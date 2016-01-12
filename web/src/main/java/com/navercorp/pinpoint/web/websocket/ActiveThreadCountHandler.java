@@ -23,16 +23,12 @@ import com.navercorp.pinpoint.common.util.PinpointThreadFactory;
 import com.navercorp.pinpoint.rpc.util.ClassUtils;
 import com.navercorp.pinpoint.rpc.util.MapUtils;
 import com.navercorp.pinpoint.rpc.util.StringUtils;
-import com.navercorp.pinpoint.rpc.util.TimerFactory;
 import com.navercorp.pinpoint.web.service.AgentService;
 import com.navercorp.pinpoint.web.websocket.message.PinpointWebSocketMessage;
 import com.navercorp.pinpoint.web.websocket.message.PinpointWebSocketMessageConverter;
 import com.navercorp.pinpoint.web.websocket.message.PinpointWebSocketMessageType;
 import com.navercorp.pinpoint.web.websocket.message.PongMessage;
 import com.navercorp.pinpoint.web.websocket.message.RequestMessage;
-import org.jboss.netty.util.Timeout;
-import org.jboss.netty.util.Timer;
-import org.jboss.netty.util.TimerTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.socket.CloseStatus;
@@ -40,6 +36,7 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -81,11 +78,11 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
     private static final long DEFAULT_FLUSH_DELAY = 1000;
     private final long flushDelay;
 
-    private Timer  healthCheckTimer;
+    private java.util.Timer healthCheckTimer;
     private static final long DEFAULT_HEALTH_CHECk_DELAY = 60 * 1000;
     private final long healthCheckDelay;
 
-    private Timer reactiveTimer;
+    private java.util.Timer reactiveTimer;
 
     public ActiveThreadCountHandler(AgentService agentService) {
         this(DEFAULT_REQUEST_MAPPING, agentService);
@@ -112,10 +109,8 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         webSocketFlushThreadPool = new ThreadPoolExecutor(Runtime.getRuntime().availableProcessors(), Integer.MAX_VALUE, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(), flushFactory);
 
         flushTimer = new java.util.Timer(ClassUtils.simpleClassName(this) + "-Flush-Timer", true);
-
-        PinpointThreadFactory threadFactory = new PinpointThreadFactory(ClassUtils.simpleClassName(this) + "-Timer", true);
-        healthCheckTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
-        reactiveTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
+        healthCheckTimer = new java.util.Timer(ClassUtils.simpleClassName(this) + "-HealthCheck-Timer", true);
+        reactiveTimer = new java.util.Timer(ClassUtils.simpleClassName(this) + "-ReActive-Timer", true);
    }
 
     @Override
@@ -132,11 +127,11 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         }
 
         if (healthCheckTimer != null) {
-            healthCheckTimer.stop();
+            healthCheckTimer.cancel();
         }
 
         if (reactiveTimer != null) {
-            reactiveTimer.stop();
+            reactiveTimer.cancel();
         }
 
         if (webSocketFlushThreadPool != null) {
@@ -159,7 +154,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
             boolean turnOn = onTimerTask.compareAndSet(false, true);
             if (turnOn) {
                 flushTimer.schedule(new ActiveThreadTimerTask(flushDelay, 0), flushDelay);
-                healthCheckTimer.newTimeout(new HealthCheckTimerTask(), DEFAULT_HEALTH_CHECk_DELAY, TimeUnit.MILLISECONDS);
+                healthCheckTimer.schedule(new HealthCheckTimerTask(), DEFAULT_HEALTH_CHECk_DELAY);
             }
         }
 
@@ -331,10 +326,10 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         }
     }
 
-    private class HealthCheckTimerTask implements TimerTask {
+    private class HealthCheckTimerTask extends java.util.TimerTask {
 
         @Override
-        public void run(Timeout timeout) throws Exception {
+        public void run() {
             try {
                 logger.info("HealthCheckTimerTask started.");
 
@@ -348,7 +343,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
                     Object untilWait = session.getAttributes().get(HEALTH_CHECK_WAIT_KEY);
                     if (untilWait != null && untilWait instanceof AtomicBoolean) {
                         if (((AtomicBoolean) untilWait).get()) {
-                            session.close(CloseStatus.SESSION_NOT_RELIABLE);
+                            closeSession(session, CloseStatus.SESSION_NOT_RELIABLE);
                         }
                     } else {
                         session.getAttributes().put(HEALTH_CHECK_WAIT_KEY, new AtomicBoolean(false));
@@ -372,12 +367,28 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
                         session.getAttributes().put(HEALTH_CHECK_WAIT_KEY, new AtomicBoolean(true));
                     }
 
-                    session.sendMessage(pingMessage);
+                    sendPingMessage(session, pingMessage);
                 }
             } finally {
                 if (healthCheckTimer != null && onTimerTask.get()) {
-                    healthCheckTimer.newTimeout(this, healthCheckDelay, TimeUnit.MILLISECONDS);
+                    healthCheckTimer.schedule(new HealthCheckTimerTask(), healthCheckDelay);
                 }
+            }
+        }
+
+        private void closeSession(WebSocketSession session, CloseStatus status) {
+            try {
+                session.close(status);
+            } catch (IOException e) {
+                logger.warn(e.getMessage(), e);
+            }
+        }
+
+        private void sendPingMessage(WebSocketSession session, TextMessage pingMessage) {
+            try {
+                session.sendMessage(pingMessage);
+            } catch (IOException e) {
+                logger.warn(e.getMessage(), e);
             }
         }
 

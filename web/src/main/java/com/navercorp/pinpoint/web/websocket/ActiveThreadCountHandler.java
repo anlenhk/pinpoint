@@ -158,7 +158,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
             sessionRepository.add(newSession);
             boolean turnOn = onTimerTask.compareAndSet(false, true);
             if (turnOn) {
-                flushTimer.schedule(new ActiveThreadTimerTask(), flushDelay);
+                flushTimer.schedule(new ActiveThreadTimerTask(flushDelay), flushDelay);
                 healthCheckTimer.newTimeout(new HealthCheckTimerTask(), DEFAULT_HEALTH_CHECk_DELAY, TimeUnit.MILLISECONDS);
             }
         }
@@ -274,11 +274,19 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
 
     private class ActiveThreadTimerTask extends java.util.TimerTask {
 
+        private final long startTimeMillis = System.currentTimeMillis();
+        private final long delay;
+
+        private int times = 0;
+
+        public ActiveThreadTimerTask(long deay) {
+            this.delay = deay;
+        }
+
         @Override
         public void run() {
-            long startTime = System.currentTimeMillis();
             try {
-                logger.info("ActiveThreadTimerTask started. {}", startTime);
+                logger.info("ActiveThreadTimerTask started. times:{}", times);
 
                 Collection<PinpointWebSocketResponseAggregator> values = aggregatorRepository.values();
                 for (final PinpointWebSocketResponseAggregator aggregator : values) {
@@ -294,12 +302,25 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
                     });
                 }
             } finally {
+                long waitTimeMillis = getWaitTimeMillis();
+
                 if (flushTimer != null && onTimerTask.get()) {
-                    flushTimer.schedule(this, flushDelay);
+                    flushTimer.schedule(this, waitTimeMillis);
                 }
             }
         }
 
+        private long getWaitTimeMillis() {
+            long waitTime = -1l;
+
+            long currentTime = System.currentTimeMillis();
+            while (waitTime <= 0) {
+                waitTime = startTimeMillis + (delay * times) - currentTime;
+                times++;
+            }
+
+            return waitTime;
+        }
     }
 
     private class HealthCheckTimerTask implements TimerTask {

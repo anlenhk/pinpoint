@@ -77,7 +77,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
 
     private ExecutorService webSocketFlushThreadPool;
 
-    private Timer flushTimer;
+    private java.util.Timer flushTimer;
     private static final long DEFAULT_FLUSH_DELAY = 1000;
     private final long flushDelay;
 
@@ -111,8 +111,9 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         PinpointThreadFactory flushFactory = new PinpointThreadFactory(ClassUtils.simpleClassName(this) + "-Flush-Thread", true);
         webSocketFlushThreadPool = new ThreadPoolExecutor(Runtime.getRuntime().availableProcessors(), Integer.MAX_VALUE, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(), flushFactory);
 
+        flushTimer = new java.util.Timer(ClassUtils.simpleClassName(this) + "-Flush-Timer", true);
+
         PinpointThreadFactory threadFactory = new PinpointThreadFactory(ClassUtils.simpleClassName(this) + "-Timer", true);
-        flushTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
         healthCheckTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
         reactiveTimer = TimerFactory.createHashedWheelTimer(threadFactory, 100, TimeUnit.MILLISECONDS, 512);
    }
@@ -127,7 +128,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         aggregatorRepository.clear();
 
         if (flushTimer != null) {
-            flushTimer.stop();
+            flushTimer.cancel();
         }
 
         if (healthCheckTimer != null) {
@@ -157,7 +158,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
             sessionRepository.add(newSession);
             boolean turnOn = onTimerTask.compareAndSet(false, true);
             if (turnOn) {
-                flushTimer.newTimeout(new ActiveThreadTimerTask(), flushDelay, TimeUnit.MILLISECONDS);
+                flushTimer.schedule(new ActiveThreadTimerTask(), flushDelay);
                 healthCheckTimer.newTimeout(new HealthCheckTimerTask(), DEFAULT_HEALTH_CHECk_DELAY, TimeUnit.MILLISECONDS);
             }
         }
@@ -271,10 +272,10 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
         }
     }
 
-    private class ActiveThreadTimerTask implements TimerTask {
+    private class ActiveThreadTimerTask extends java.util.TimerTask {
 
         @Override
-        public void run(Timeout timeout) throws Exception {
+        public void run() {
             long startTime = System.currentTimeMillis();
             try {
                 logger.info("ActiveThreadTimerTask started. {}", startTime);
@@ -294,7 +295,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
                 }
             } finally {
                 if (flushTimer != null && onTimerTask.get()) {
-                    flushTimer.newTimeout(this, flushDelay, TimeUnit.MILLISECONDS);
+                    flushTimer.schedule(this, flushDelay);
                 }
             }
         }

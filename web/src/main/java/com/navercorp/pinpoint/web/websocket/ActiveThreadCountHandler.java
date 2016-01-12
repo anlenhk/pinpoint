@@ -158,7 +158,7 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
             sessionRepository.add(newSession);
             boolean turnOn = onTimerTask.compareAndSet(false, true);
             if (turnOn) {
-                flushTimer.schedule(new ActiveThreadTimerTask(flushDelay), flushDelay);
+                flushTimer.schedule(new ActiveThreadTimerTask(flushDelay, 0), flushDelay);
                 healthCheckTimer.newTimeout(new HealthCheckTimerTask(), DEFAULT_HEALTH_CHECk_DELAY, TimeUnit.MILLISECONDS);
             }
         }
@@ -274,13 +274,19 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
 
     private class ActiveThreadTimerTask extends java.util.TimerTask {
 
-        private final long startTimeMillis = System.currentTimeMillis();
+        private final long startTimeMillis;
         private final long delay;
 
         private int times = 0;
 
-        public ActiveThreadTimerTask(long deay) {
-            this.delay = deay;
+        public ActiveThreadTimerTask(long delay, int times) {
+            this(System.currentTimeMillis(), delay, times);
+        }
+
+        public ActiveThreadTimerTask(long startTimeMillis, long delay, int times) {
+            this.startTimeMillis = startTimeMillis;
+            this.delay = delay;
+            this.times = times;
         }
 
         @Override
@@ -301,11 +307,13 @@ public class ActiveThreadCountHandler extends TextWebSocketHandler implements Pi
                         }
                     });
                 }
+            } catch (Exception e) {
+                logger.warn(e.getMessage(), e);
             } finally {
                 long waitTimeMillis = getWaitTimeMillis();
 
                 if (flushTimer != null && onTimerTask.get()) {
-                    flushTimer.schedule(this, waitTimeMillis);
+                    flushTimer.schedule(new ActiveThreadTimerTask(startTimeMillis, delay, times), waitTimeMillis);
                 }
             }
         }

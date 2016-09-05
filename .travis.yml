@@ -6,3 +6,6 @@ jdk:
 env: JAVA_6_HOME=/usr/lib/jvm/java-6-openjdk-amd64 JAVA_7_HOME=/usr/lib/jvm/java-7-oracle JAVA_8_HOME=/usr/lib/jvm/java-8-oracle
 
 script: mvn test jacoco:report-aggregate | grep -Fv 'DEBUG'
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
